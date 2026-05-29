@@ -2,3 +2,18 @@ main
 *.o
 files/
 perf.data*
+# 忽略编译文件和可执行程序
+*.so
+main
+
+# 忽略序列化生成的临时文件
+*.tmp_*
+*.load_tmp_*
+
+# 忽略测试数据集
+*.fvecs
+*.bvecs
+*.ivecs
+
+# 忽略 VSCode 自身的配置
+.vscode/
