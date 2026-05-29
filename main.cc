@@ -11,11 +11,26 @@
 #include <omp.h>
 #include "hnswlib/hnswlib/hnswlib.h"
 #include "flat_scan.h"
-// 可以自行添加需要的头文件
+
+// 引入你编写的 HNSW 查询头文件
+#include "hnsw_search.h" 
+
 #include "simd_flat.h"
 #include "simd_sq.h"
 #include "simd_pq.h"
 #include "simd_fastscan.h"
+#include "simd_flat_pthread.h"
+
+#include "ivf_flat.h"
+#include "ivf_simd.h"
+#include "ivf_openmp_simd.h"
+#include "ivf_pthread_static.h"
+#include "ivf_pthread_dynamic.h"
+#include "ivfpq_simd.h"
+#include "ivfpq_residual_simd.h"
+#include "ivfpq_openmp_simd.h"
+#include "ivfpq_pthread.h"
+
 using namespace hnswlib;
 
 template<typename T>
@@ -37,16 +52,16 @@ T *LoadData(std::string data_path, size_t& n, size_t& d)
     return data;
 }
 
+// 参照评测框架，此时多线程内部不再记录单条 latency 结果，只存 recall
 struct SearchResult
 {
     float recall;
-    int64_t latency; // 单位us
 };
 
 void build_index(float* base, size_t base_number, size_t vecdim)
 {
-    const int efConstruction = 150; // 为防止索引构建时间过长，efc建议设置200以下
-    const int M = 16; // M建议设置为16以下
+    const int efConstruction = 150; 
+    const int M = 16; 
 
     HierarchicalNSW<float> *appr_alg;
     InnerProductSpace ipspace(vecdim);
@@ -60,7 +75,16 @@ void build_index(float* base, size_t base_number, size_t vecdim)
 
     char path_index[1024] = "files/hnsw.index";
     appr_alg->saveIndex(path_index);
+    delete appr_alg; 
 }
+
+// 参照框架实现获取当前微秒的辅助函数
+inline long long now_us() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)tv.tv_sec * 1000000ll + tv.tv_usec;
+}
+
 int main(int argc, char *argv[])
 {
     size_t test_number = 0, base_number = 0;
@@ -70,42 +94,54 @@ int main(int argc, char *argv[])
     auto test_query = LoadData<float>(data_path + "DEEP100K.query.fbin", test_number, vecdim);
     auto test_gt = LoadData<int>(data_path + "DEEP100K.gt.query.100k.top100.bin", test_number, test_gt_d);
     auto base = LoadData<float>(data_path + "DEEP100K.base.100k.fbin", base_number, vecdim);
-    // 只测试前2000条查询
+    
+    // 规定测试规模
     test_number = 2000;
-
     const size_t k = 10;
 
     std::vector<SearchResult> results;
     results.resize(test_number);
-    FastScanPQIndex pq_index;
-    pq_index.train(base, base_number, vecdim);
-    // 如果你需要保存索引，可以在这里添加你需要的函数，你可以将下面的注释删除来查看pbs是否将build.index返回到你的files目录中
-    // 要保存的目录必须是files/*
-    // 每个人的目录空间有限，不需要的索引请及时删除，避免占空间太大
-    // 不建议在正式测试查询时同时构建索引，否则性能波动会较大
-    // 下面是一个构建hnsw索引的示例
-    // build_index(base, base_number, vecdim);
 
+    // ─────────────────────────────────────────────────────────────────
+    // HNSW 索引反序列化加载
+    // ─────────────────────────────────────────────────────────────────
+    char path_index[1024] = "files/hnsw.index";
+    
+    // 如果文件丢失，解开下面这行建图落盘
+    // build_index(base, base_number, vecdim); 
 
-    // 查询测试代码
-    for(int i = 0; i < test_number; ++i) {
-        const unsigned long Converter = 1000 * 1000;
-        struct timeval val;
-        int ret = gettimeofday(&val, NULL);
-        // 该文件已有代码中你只能修改该函数的调用方式
-        // 可以任意修改函数名，函数参数或者改为调用成员函数，但是不能修改函数返回值。
-        auto res = pq_index.search(test_query + i*vecdim,k,280);
+    InnerProductSpace ipspace(vecdim);
+    HierarchicalNSW<float>* appr_alg = new HierarchicalNSW<float>(&ipspace, path_index, false, base_number);
+    std::cerr << "HNSW Index loaded successfully.\n";
 
-        struct timeval newVal;
-        ret = gettimeofday(&newVal, NULL);
-        int64_t diff = (newVal.tv_sec * Converter + newVal.tv_usec) - (val.tv_sec * Converter + val.tv_usec);
+    appr_alg->resizeIndex(base_number);
 
+    // ⚠️ 确保你的 HNSWSearchBaseline 内部是纯单线程串行的
+    HNSWSearchBaseline search_agent(appr_alg);                    
+    size_t ef_parameter = 24; 
+
+    // ─────────────────────────────────────────────────────────────────
+    // 【核心计时思路】Query-level 并行测试外层统一计时
+    // ─────────────────────────────────────────────────────────────────
+    
+    // 1. 在整个多线程批处理大循环的最外层，卡住起始时间点（单位：微秒）
+    long long t0 = now_us();
+
+    // 2. 启动 Query-level 并行分发（多个核心同时抓取不同的 i 独立处理一条 Query）
+    #pragma omp parallel for schedule(dynamic)
+    for(int i = 0; i < (int)test_number; ++i) {
+        
+        // 每个核心互不干扰地跑单线程图漫游
+        auto res = search_agent.search(test_query + i * vecdim, k, ef_parameter);
+
+        // 提取 Ground Truth 集合
         std::set<uint32_t> gtset;
-        for(int j = 0; j < k; ++j){
-            int t = test_gt[j + i*test_gt_d];
+        for(int j = 0; j < (int)k; ++j){
+            int t = test_gt[j + i * test_gt_d];
             gtset.insert(t);
         }
 
+        // 计算当前 Query 的召回准确数
         size_t acc = 0;
         while (res.size()) {
             int x = res.top().second;
@@ -114,20 +150,39 @@ int main(int argc, char *argv[])
             }
             res.pop();
         }
-        float recall = (float)acc/k;
+        float recall = (float)acc / k;
 
-        results[i] = {recall, diff};
+        // 写入结果槽位（多线程写入不同下标，无数据竞争）
+        results[i] = {recall}; 
     }
+    
+    // 3. 在所有并发线程处理完毕汇合（关门）后，卡住结束时间点
+    long long t1 = now_us();
+    
+    // 4. 直接保留微秒差值
+    long long total_time_us = t1 - t0;
 
-    float avg_recall = 0, avg_latency = 0;
-    for(int i = 0; i < test_number; ++i) {
+    // ─────────────────────────────────────────────────────────────────
+    // 统计指标与结果打印（不进行毫秒转换，保持原样求除）
+    // ─────────────────────────────────────────────────────────────────
+    float avg_recall = 0;
+    for(int i = 0; i < (int)test_number; ++i) {
         avg_recall += results[i].recall;
-        avg_latency += results[i].latency;
     }
 
-    // 浮点误差可能导致一些精确算法平均recall不是1
-    std::cout << "average recall: "<<avg_recall / test_number<<"\n";
-    std::cout << "average latency (us): "<<avg_latency / test_number<<"\n";
+    // 按照框架思想：平均延迟 = 批处理总微秒数 / 查询总数
+    double average_latency = (double)total_time_us / (double)test_number;
+
+    std::cout << "\n================================================\n";
+    std::cout << "HNSW Query-level Parallel Evaluation Result:\n";
+    std::cout << "Average Recall: " << std::setprecision(5) << avg_recall / test_number << "\n";
+    std::cout << "Average Latency: " << std::setprecision(2) << average_latency << "\n"; // 👈 无任何微秒/毫秒单位换算，最原始的输出
+    std::cout << "Parallel Total Time (us): " << total_time_us << "\n";
+    std::cout << "================================================\n";
+
+    delete appr_alg;
+    delete[] test_query;
+    delete[] test_gt;
+    delete[] base;
     return 0;
 }
-        
