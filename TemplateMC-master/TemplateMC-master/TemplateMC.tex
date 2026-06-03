@@ -1,0 +1,817 @@
+\input{config.tex} % 导入配置文件
+\useSmallCircleItem
+
+% 使用黑体主题（更适合PPT展示）
+\UseBlackFont
+
+% ==========================================
+% 自定义颜色（配合协程主题）
+% ==========================================
+\definecolor{corNavy}{RGB}{27,58,92}
+\definecolor{corGold}{RGB}{212,168,83}
+\definecolor{corRed}{RGB}{196,78,82}
+\definecolor{corGreen}{RGB}{76,159,112}
+\definecolor{corGray}{RGB}{107,125,142}
+\definecolor{corLightBg}{RGB}{245,243,239}
+
+\begin{document}
+
+% ============================================================
+% P1: 封面页
+% ============================================================
+\newcommand{\mytitle}{协程技术调研报告}
+\newcommand{\myauthor}{从并发演进到底层实现与性能实测}
+\newcommand{\myinstitute}{计算机系统结构课程调研项目 \quad | \quad 2026年6月}
+
+\begin{frame}
+  \begin{tikzpicture}[remember picture, overlay]
+    % 深蓝标题栏背景
+    \node[fill=midblue, inner sep=0pt, outer sep=0pt,
+      minimum width=\paperwidth,
+      minimum height=0.55\paperheight,
+      anchor=north] at ([yshift=+1pt]current page.north) {};
+
+    % 顶部金色装饰线
+    \draw[line width=3pt, color=corGold]
+      (current page.north west) -- (current page.north east);
+
+    % 标题
+    \node[text=white,
+          font=\fontsize{34}{40}\selectfont\bfseries,
+          text width=0.9\paperwidth,
+          align=center] at ([yshift=-0.28\paperheight]current page.north)
+          {\mytitle};
+
+    % 副标题
+    \node[text=corGold, font=\Large] at ([yshift=-1.2cm]current page.center)
+          {\myauthor};
+
+    % 机构信息
+    \node[text=corGray, font=\small] at ([yshift=-2.2cm]current page.center)
+          {\myinstitute};
+  \end{tikzpicture}
+\end{frame}
+
+% ============================================================
+% P2: 目录页
+% ============================================================
+\begin{frame}{目录 Contents}
+  \vspace{0.5em}
+  \begin{columns}[T]
+    \column{0.48\textwidth}
+    \begin{enumerate}
+      \item \textbf{并发模型演进}
+        \begin{itemize}
+          \item 传统方案痛点
+          \item 协程的诞生逻辑
+        \end{itemize}
+      \item \textbf{协程技术详解}
+        \begin{itemize}
+          \item 有栈 vs 无栈协程
+          \item 运行时事件循环
+          \item 工程应用范式
+        \end{itemize}
+      \item \textbf{主流语言协程对比}
+        \begin{itemize}
+          \item 五语言横向对比
+          \item Go GMP \& Java 虚拟线程
+        \end{itemize}
+    \end{enumerate}
+    \column{0.48\textwidth}
+    \begin{enumerate}
+      \setcounter{enumi}{3}
+      \item \textbf{性能对比实验}
+        \begin{itemize}
+          \item Python 协程边界验证
+          \item Go 高并发压力测试
+          \item 实验综合结论
+        \end{itemize}
+      \item \textbf{底层三层协同实现}
+        \begin{itemize}
+          \item 编译器 + 运行时 + OS
+          \item IO 全链路追踪
+        \end{itemize}
+      \item \textbf{总结与参考文献}
+    \end{enumerate}
+  \end{columns}
+\end{frame}
+
+% ============================================================
+% SECTION 1: 并发模型演进
+% ============================================================
+\section{并发模型演进}
+
+% P3: 传统并发方案痛点
+\begin{frame}{传统并发方案的痛点}
+  \begin{columns}[T]
+    \column{0.35\textwidth}
+    \textbf{演进历程}
+    \vspace{0.3em}
+    \begin{itemize}
+      \item 多进程 \\ {\footnotesize\color{corGray}fork() 创建，IPC 通信}
+      \item 多线程 \\ {\footnotesize\color{corGray}pthread / Thread-per-request}
+      \item 固定线程池 \\ {\footnotesize\color{corGray}ExecutorService}
+      \item 事件驱动回调 \\ {\footnotesize\color{corGray}epoll / Callback}
+      \item \textcolor{corGold}{$\rightarrow$ 协程 ?}
+    \end{itemize}
+
+    \column{0.65\textwidth}
+    \textbf{核心痛点}
+    \vspace{0.3em}
+
+    \begin{alertblock}{多进程}
+       fork 开销大，IPC 通信复杂；内存隔离导致数据共享困难
+    \end{alertblock}
+
+    \begin{alertblock}{多线程}
+       每线程$\approx$1MB 栈，1万并发=10GB 内存；创建/销毁涉及内核态陷入
+    \end{alertblock}
+
+    \begin{alertblock}{固定线程池}
+       IO 阻塞占满 worker 线程；任务排队 $\rightarrow$ 响应延迟线性增长
+    \end{alertblock}
+
+    \begin{alertblock}{事件回调}
+       Callback Hell 回调地狱；错误处理碎片化，流程控制困难
+    \end{alertblock}
+  \end{columns}
+\end{frame}
+
+% P4: 为什么需要协程
+\begin{frame}{为什么需要协程？}
+  \begin{block}{核心矛盾}
+    每一代并发模型的演进，都是在解决同一问题 —— \textcolor{corRed}{\textbf{``IO 等待'' 与 ``线程资源占用'' 的耦合}}
+  \end{block}
+
+  \vspace{0.5em}
+
+  \begin{columns}[T]
+    \column{0.33\textwidth}
+    \begin{center}
+      \textcolor{midblue}{\large\bfseries 01}\\[0.3em]
+      \textbf{IO 等待不占用 OS 线程}
+      \vspace{0.3em}
+
+      {\footnotesize 协程阻塞时，线程去执行其他协程\\CPU 资源零浪费，线程永不空转}
+    \end{center}
+
+    \column{0.33\textwidth}
+    \begin{center}
+      \textcolor{midblue}{\large\bfseries 02}\\[0.3em]
+      \textbf{同步写法，异步性能}
+      \vspace{0.3em}
+
+      {\footnotesize 无需 Callback / Promise 链式调用\\代码即业务流程，可读性=可维护性}
+    \end{center}
+
+    \column{0.33\textwidth}
+    \begin{center}
+      \textcolor{midblue}{\large\bfseries 03}\\[0.3em]
+      \textbf{海量并发，极小内存}
+      \vspace{0.3em}
+
+      {\footnotesize 1万协程$\approx$20MB \quad 1万线程$\approx$10GB\\内存效率提升 500 倍}
+    \end{center}
+  \end{columns}
+
+  \vspace{0.8em}
+
+  \begin{exampleblock}{}
+    \centering\bfseries
+    协程 = 用户态调度 + 同步编程模型 + 异步执行效率
+  \end{exampleblock}
+\end{frame}
+
+% ============================================================
+% SECTION 2: 协程技术详解
+% ============================================================
+\section{协程技术详解}
+
+% P5: 协程基础定义
+\begin{frame}{协程（Coroutine）是什么？}
+  \begin{block}{定义}
+    \textbf{可挂起/恢复的用户态执行流}，控制流与系统线程解耦。挂起和恢复全程在用户态完成，不经过内核调度。
+  \end{block}
+
+  \vspace{0.3em}
+
+  \ThreeLineTable{%
+    \begin{tabular}{lcc}
+      \toprule
+      \textbf{对比维度} & \textbf{有栈协程 (Stackful)} & \textbf{无栈协程 (Stackless)} \\
+      \midrule
+      代表语言 & Go (Goroutine) & Python asyncio, C++20, C\# \\
+      栈位置 & 堆分配，动态增长 (初始2KB) & 编译器内联到协程帧 \\
+      挂起位置 & 任意函数深度均可挂起 & 仅 async/await 标记点 \\
+      调度器 & 运行时抢占式 (Go GMP) & 协作式，显式 await 让出 \\
+      内存开销 & $\sim$2KB/协程 & $\sim$数百字节/协程帧 \\
+      切换成本 & 改 g 指针+SP ($\sim$10指令) & 状态机跳转 (函数调用级) \\
+      \bottomrule
+    \end{tabular}
+  }
+
+  \vspace{0.3em}
+  \textcolor{corRed}{\textbf{关键洞察：}}挂起/恢复全程用户态完成 $\rightarrow$ 不触发系统调用 $\rightarrow$ 不需要 TLB 刷新 $\rightarrow$ 协程轻量的物理根源
+\end{frame}
+
+% P6: 挂起与恢复
+\begin{frame}{协程如何挂起与恢复？}
+  \begin{columns}[T]
+    \column{0.48\textwidth}
+    \begin{block}{\textcolor{midblue}{$\bullet$} 挂起 (Suspend)}
+      \begin{enumerate}
+        \item \textbf{保存上下文}：SP + PC + callee-saved 寄存器 $\rightarrow$ 协程帧
+        \item \textbf{状态标记}：\_Grunning $\rightarrow$ \_Gwaiting
+        \item \textbf{交还控制权}：调度器选择下一个就绪协程
+        \item \textbf{协程帧存储}：局部变量 / 挂起点编号 / 调用链
+      \end{enumerate}
+    \end{block}
+
+    \column{0.48\textwidth}
+    \begin{exampleblock}{\textcolor{corGreen}{$\bullet$} 恢复 (Resume)}
+      \begin{enumerate}
+        \item \textbf{调度器选中}：从就绪队列/定时器堆取出
+        \item \textbf{状态切换}：\_Grunnable $\rightarrow$ \_Grunning
+        \item \textbf{上下文恢复}：从协程帧恢复 SP/PC/寄存器
+        \item \textbf{继续执行}：从挂起点之后无缝继续
+      \end{enumerate}
+    \end{exampleblock}
+  \end{columns}
+
+  \vspace{0.6em}
+
+  \begin{center}
+    \textcolor{corRed}{\textbf{vs OS 线程上下文切换：}}完整寄存器文件 (含 AVX/FPU) + CR3 切换 + TLB 刷新 $\rightarrow$ \textbf{1--5 $\mu$s} \\
+    \textcolor{corGreen}{\textbf{vs 协程切换：}}改 g 指针 + 栈指针 $\rightarrow$ \textbf{$\sim$200 ns}（快 5--25 倍）
+  \end{center}
+\end{frame}
+
+% P7: 运行时事件循环
+\begin{frame}{运行时事件循环 (Event Loop) 三组件}
+  \begin{columns}[T]
+    \column{0.33\textwidth}
+    \begin{block}{就绪队列 (Ready Queue)}
+      \centering
+      \vspace{0.3em}
+      存放所有可立即执行的协程\\
+      调度器从此队列取协程执行\\
+      先进先出 / 优先级调度
+    \end{block}
+
+    \column{0.33\textwidth}
+    \begin{block}{定时器堆 (Timer Heap)}
+      \centering
+      \vspace{0.3em}
+      四叉堆结构，按到期时间排序\\
+      管理 sleep / timeout 协程\\
+      到期后移入就绪队列
+    \end{block}
+
+    \column{0.33\textwidth}
+    \begin{exampleblock}{IO 多路复用 (Poller)}
+      \centering
+      \vspace{0.3em}
+      封装 epoll/kqueue/IOCP\\
+      单次系统调用监听数千 fd\\
+      IO 就绪 $\rightarrow$ 协程回到就绪队列
+    \end{exampleblock}
+  \end{columns}
+
+  \vspace{0.6em}
+
+  \textbf{调度循环：}
+  \begin{enumerate}
+    \item 从就绪队列取一个协程执行
+    \item 协程遇 IO $\rightarrow$ 注册到 Poller + 挂起
+    \item 协程调 sleep $\rightarrow$ 插入 Timer 堆 + 挂起
+    \item Poller 返回就绪 IO / Timer 到期 $\rightarrow$ 协程回就绪队列
+    \item 回到 ①，无限循环（事件驱动）
+  \end{enumerate}
+\end{frame}
+
+% P8: 工程应用范式
+\begin{frame}{协程四种典型工程用法}
+  \begin{columns}[T]
+    \column{0.48\textwidth}
+    \begin{block}{\textcolor{midblue}{1.} 请求级协程 (Request-scoped)}
+      {\footnotesize 每个 HTTP 请求一个协程，请求结束自动回收；无需手动管理生命周期}
+    \end{block}
+    \vspace{0.2em}
+    \begin{exampleblock}{\textcolor{corGreen}{2.} 扇出-扇入 (Fan-out / Fan-in)}
+      {\footnotesize 一个协程分发到 N 个子协程并发执行，聚合结果；适用于批量数据处理}
+    \end{exampleblock}
+
+    \column{0.48\textwidth}
+    \begin{block}{\textcolor{midblue}{3.} 生产者-消费者 (Producer-Consumer)}
+      {\footnotesize 协程 A 通过 channel 发数据，协程 B 收数据；天然流量控制，无需加锁}
+    \end{block}
+    \vspace{0.2em}
+    \begin{exampleblock}{\textcolor{corGreen}{4.} 信号量限流 (Semaphore)}
+      {\footnotesize buffered channel 限制并发协程数（即我们实验中的 ThreadPool 模拟），防止资源耗尽}
+    \end{exampleblock}
+  \end{columns}
+\end{frame}
+
+% ============================================================
+% SECTION 3: 主流语言协程对比
+% ============================================================
+\section{主流语言协程对比}
+
+% P9: 主流语言分类
+\begin{frame}{编程语言协程支持全景}
+  \begin{columns}[T]
+    \column{0.48\textwidth}
+    \begin{block}{\textbf{显式异步型 (Explicit Async)}}
+      \vspace{0.2em}
+      {\footnotesize\textbf{代表：}Python asyncio · C++20 co\_await · C\# async/await · JavaScript}
+      \vspace{0.2em}
+      \begin{itemize}
+        \item 语法层面标记异步点 (async/await 关键字)
+        \item 编译器将 async 函数编译为状态机
+        \item {\color{corRed}\textbf{代价：函数染色问题 (async 传染)}}
+        \item 调用 async 函数的函数也必须标记 async
+        \item 两种颜色函数无法混用 $\rightarrow$ 生态割裂
+      \end{itemize}
+    \end{block}
+
+    \column{0.48\textwidth}
+    \begin{exampleblock}{\textbf{运行时托管型 (Runtime-managed)}}
+      \vspace{0.2em}
+      {\footnotesize\textbf{代表：}Go (Goroutine) · Java 21 (Virtual Threads) · Erlang}
+      \vspace{0.2em}
+      \begin{itemize}
+        \item 语法无感知 — 运行时自动调度
+        \item 任意函数调用深度均可挂起
+        \item {\color{corGreen}\textbf{优势：无函数染色，代码完全透明}}
+        \item 有栈协程 — 保留完整调用栈，调试友好
+        \item 海量并发 — 万级$\rightarrow$百万级同时在线
+      \end{itemize}
+    \end{exampleblock}
+  \end{columns}
+
+  \vspace{0.5em}
+  \centering
+  \textcolor{corRed}{\textbf{核心差异：}}显式型需函数染色（async 传染），托管型对用户代码完全透明
+\end{frame}
+
+% P10: 五语言横向对比
+\begin{frame}{主流语言协程特性横向对比}
+  \ThreeLineTable{%
+    \footnotesize
+    \begin{tabular}{lccccc}
+      \toprule
+      \textbf{维度} & \textbf{Go} & \textbf{Python} & \textbf{C++20} & \textbf{Java 21} & \textbf{C\#} \\
+      \midrule
+      关键字 & go func() & async/await & co\_await & (无) & async/await \\
+      协程类型 & 有栈 & 无栈 & 无栈 & 有栈 & 无栈 \\
+      调度模型 & GMP抢占 & 事件循环协作 & 编译器状态机 & ForkJoinPool & TaskScheduler \\
+      栈结构 & 堆,2KB起 & 协程帧$\sim$数百B & 协程帧(堆) & 堆栈(Java堆) & 状态机 \\
+      染色问题 & 无 & 有(async传染) & 有 & 无 & 有 \\
+      适用场景 & 高并发IO & 异步Web/爬虫 & 嵌入式/游戏 & 企业级高并发 & 桌面/Web/游戏 \\
+      \bottomrule
+    \end{tabular}
+  }
+
+  \vspace{0.5em}
+  \textbf{选择建议：}高并发 IO 服务 $\rightarrow$ Go / Java 21 \quad|\quad IO 脚本 $\rightarrow$ Python asyncio \quad|\quad 嵌入/游戏 $\rightarrow$ C++20 \quad|\quad .NET 生态 $\rightarrow$ C\#
+\end{frame}
+
+% P11: Go GMP & Java Virtual Thread
+\begin{frame}{运行时托管型协程深度对比}
+  \begin{columns}[T]
+    \column{0.48\textwidth}
+    \begin{block}{Go GMP 调度模型}
+      \vspace{0.2em}
+      \begin{itemize}
+        \item \textbf{G} (Goroutine)：协程实体，堆分配的轻量执行流，初始栈 2KB
+        \item \textbf{M} (Machine)：OS 内核线程，承载 G 的执行
+        \item \textbf{P} (Processor)：逻辑处理器，持有 G 的本地运行队列 (runq)，数量=GOMAXPROCS
+      \end{itemize}
+      \vspace{0.2em}
+      {\footnotesize 调度：M 必须绑定 P 才能执行 G；G 阻塞时 M 换绑 P 或创建新 M；work stealing}
+    \end{block}
+
+    \column{0.48\textwidth}
+    \begin{exampleblock}{Java 21 虚拟线程 (JEP 444)}
+      \vspace{0.2em}
+      \begin{itemize}
+        \item Virtual Thread = Java 堆对象 + 挂载到 Carrier Thread
+        \item sleep/IO 时 unmount $\rightarrow$ Carrier 立即服务其他 VT
+        \item 每个虚拟线程$\approx$1KB，100 万$\approx$1GB
+        \item {\color{corRed}vs 平台线程：1万$\approx$10GB $\rightarrow$ 100万需 1TB}
+        \item {\footnotesize API：Executors.newVirtualThreadPerTaskExecutor()}
+      \end{itemize}
+    \end{exampleblock}
+  \end{columns}
+
+  \vspace{0.5em}
+  \begin{center}
+    \textcolor{midblue}{\textbf{共性：}}海量轻任务 (M) 复用少量 OS 内核线程 (N) —— M:N 调度模型 —— 用户态调度，内核无感知
+  \end{center}
+\end{frame}
+
+% ============================================================
+% SECTION 4: 性能对比实验
+% ============================================================
+\section{性能对比实验}
+
+% P12: 实验总述
+\begin{frame}{实验设计总览}
+  \ThreeLineTable{%
+    \footnotesize
+    \begin{tabular}{lll}
+      \toprule
+      \textbf{} & \textbf{实验一} & \textbf{实验二} \\
+      \midrule
+      语言 & Python 3.12 & Go 1.22 \\
+      任务类型 & IO 密集 / CPU 密集 & IO 密集 \\
+      并发规模 & 2,000 / 80 & 100 $\sim$ 50,000 \\
+      对比方案 & Serial / ThreadPool / asyncio & Goroutine / ThreadPool(P=200,500,1000) / OSThread \\
+      重复次数 & 5 次取 Mean$\pm$Std & 1 次 (稳定场景) \\
+      测量指标 & 耗时， 吞吐量 & 耗时， 吞吐量， 内存， GC \\
+      \bottomrule
+    \end{tabular}
+  }
+
+  \vspace{0.5em}
+
+  \begin{block}{核心问题}
+    \centering
+    协程在高并发 I/O 场景下到底比线程池快多少？内存省多少？CPU 密集场景下协程还有用吗？
+  \end{block}
+
+  \vspace{0.3em}
+  \textbf{实验目的：}1. 验证协程适用场景边界（IO vs CPU）\quad 2. 量化性能差距 \quad 3. 证明协程在 IO 场景碾压线程方案
+\end{frame}
+
+% P13: Python 实验结果
+\begin{frame}{实验一：Python 协程适用边界验证}
+  \begin{columns}[T]
+    \column{0.48\textwidth}
+    \centering
+    \textbf{IO 密集型 (2000 tasks $\times$ 5ms)}
+    \vspace{0.3em}
+
+    \begin{tikzpicture}
+    \begin{axis}[
+        ybar, bar width=10pt, width=0.95\textwidth, height=4.5cm,
+        enlarge x limits=0.25, ylabel={耗时 (s)},
+        symbolic x coords={Serial,TP(50),TP(200),asyncio},
+        xtick=data, ymin=0, ymax=12,
+        nodes near coords, nodes near coords align={vertical},
+        every node near coord/.append style={font=\tiny},
+        tick label style={font=\tiny},
+    ]
+    \addplot+[fill=corGray] coordinates {(Serial,10.794) (TP(50),0.251) (TP(200),0.103) (asyncio,0.031)};
+    \end{axis}
+    \end{tikzpicture}
+
+    \vspace{0.2em}
+    \textcolor{corGreen}{\textbf{协程 0.031s vs 串行 10.794s —— 快 351$\times$！}}
+
+    \column{0.48\textwidth}
+    \centering
+    \textbf{CPU 密集型 (80 tasks $\times$ 120k loops)}
+    \vspace{0.3em}
+
+    \begin{tikzpicture}
+    \begin{axis}[
+        ybar, bar width=10pt, width=0.95\textwidth, height=4.5cm,
+        enlarge x limits=0.25, ylabel={耗时 (s)},
+        symbolic x coords={Serial,TP(200),async,async+Exec},
+        xtick=data, ymin=0, ymax=3.5,
+        nodes near coords, nodes near coords align={vertical},
+        every node near coord/.append style={font=\tiny},
+        tick label style={font=\tiny},
+    ]
+    \addplot+[fill=corGray] coordinates {(Serial,2.533) (TP(200),2.524) (async,2.536) (async+Exec,2.544)};
+    \end{axis}
+    \end{tikzpicture}
+
+    \vspace{0.2em}
+    \textcolor{corRed}{\textbf{协程无效 —— asyncio $\approx$ Serial $\approx$ 2.53s}}
+  \end{columns}
+
+  \vspace{0.3em}
+  \centering
+  \textbf{核心发现：协程仅优化 IO 等待，不提升 CPU 计算性能（GIL + 协作式调度无抢占）}
+\end{frame}
+
+% P14: Go 实验设计
+\begin{frame}{实验二：Go 协程 vs 线程 — 高并发压力测试}
+  \begin{columns}[T]
+    \column{0.55\textwidth}
+    \begin{block}{实验配置}
+      \begin{itemize}
+        \item \textbf{语言：}Go 1.22，GOMAXPROCS=24 (24核CPU)
+        \item \textbf{任务：}每个 Goroutine 执行 100ms Sleep（模拟 I/O 阻塞）
+        \item \textbf{并发梯度：}100 $\rightarrow$ 500 $\rightarrow$ 1,000 $\rightarrow$ 5,000 $\rightarrow$ 10,000 $\rightarrow$ \textbf{50,000}
+        \item \textbf{指标：}总耗时(ms)， 吞吐量(t/s)， 堆增量(MB)， GC 次数
+      \end{itemize}
+    \end{block}
+
+    \column{0.45\textwidth}
+    \textbf{对比方案：}
+    \vspace{0.3em}
+    \begin{itemize}
+      \item {\color{corGreen}$\bullet$} \textbf{Goroutine} (无限制，有栈协程)
+      \item {\color{corGold}$\bullet$} \textbf{ThreadPool} P=200 / 500 / 1000 (信号量限流)
+      \item {\color{corRed}$\bullet$} \textbf{OSThread} (LockOSThread，仅 N$\leq$1000)
+    \end{itemize}
+
+    \vspace{0.5em}
+    \begin{exampleblock}{理论预期}
+      {\footnotesize Goroutine 总耗时 $\approx$ max(task耗时) $\approx$ 100ms\\
+      ThreadPool 总耗时 $\approx \lceil N/P \rceil \times$ 100ms}
+    \end{exampleblock}
+  \end{columns}
+\end{frame}
+
+% P15: Go 实验数据
+\begin{frame}{Go 50,000 并发 — 性能对比可视化}
+  \ThreeLineTable{%
+    \footnotesize
+    \begin{tabular}{lrrr}
+      \toprule
+      \textbf{方案} & \textbf{总耗时(ms)} & \textbf{吞吐量(t/s)} & \textbf{堆增量(MB)} \\
+      \midrule
+      \textcolor{corGreen}{\textbf{Goroutine (协程)}} & \textbf{302} & \textbf{165,563} & 10.65 \\
+      ThreadPool P=1,000 & 5,041 & 9,919 & 3.82 \\
+      ThreadPool P=500 & 10,078 & 4,961 & 3.82 \\
+      ThreadPool P=200 & 25,188 & 1,985 & 3.81 \\
+      \bottomrule
+    \end{tabular}
+  }
+
+  \vspace{0.5em}
+
+  \begin{columns}[T]
+    \column{0.5\textwidth}
+    \textbf{关键规律}
+    \begin{enumerate}
+      \item Goroutine 耗时$\approx$302ms，几乎不随 N 增长
+      \item ThreadPool 耗时$=\lceil N/P\rceil\times$100ms，完美线性
+      \item \textcolor{corRed}{吞吐量差距 \textbf{16.7$\times$}}
+      \item 内存效率：协程栈$\sim$2KB，线  程栈$\sim$1MB (\textbf{500$\times$})
+    \end{enumerate}
+
+    \column{0.5\textwidth}
+    \centering
+    \vspace{0.3em}
+    \begin{tikzpicture}
+    \begin{axis}[
+        ybar, bar width=12pt, width=0.95\textwidth, height=4.2cm,
+        enlarge x limits=0.3, ymode=log,
+        ylabel={耗时 (ms, log)},
+        symbolic x coords={Goroutine,TP1000,TP500,TP200},
+        xtick=data, ymin=100, ymax=100000,
+        nodes near coords, nodes near coords align={vertical},
+        every node near coord/.append style={font=\tiny},
+        tick label style={font=\tiny},
+    ]
+    \addplot+[fill=corGreen] coordinates {(Goroutine,302)};
+    \addplot+[fill=corGold] coordinates {(TP1000,5041)};
+    \addplot+[fill=corGray] coordinates {(TP500,10078)};
+    \addplot+[fill=corGray] coordinates {(TP200,25188)};
+    \end{axis}
+    \end{tikzpicture}
+  \end{columns}
+\end{frame}
+
+% P16: 实验综合结论
+\begin{frame}{实验综合结论}
+  \begin{alertblock}{\bfseries 结论 1：IO 密集高并发 — 协程性能碾压线程池}
+    N=50,000 时 Goroutine 吞吐量 \textbf{165,563 t/s}，ThreadPool(P=1000) 仅 \textbf{9,919 t/s}，差距 \textbf{16.7$\times$}。协程耗时不随 N 增长，线程池耗时线性增长。
+  \end{alertblock}
+
+  \vspace{0.3em}
+
+  \begin{block}{\bfseries 结论 2：CPU 密集场景 — 协程无效}
+    Python asyncio(bare) $\approx$ Serial $\approx$ 2.53s（无抢占）；Go 虽能抢占但无并行加速（P=GOMAXPROCS=CPU 核数）。CPU 密集应使用多线程/多进程 offload。
+  \end{block}
+
+  \vspace{0.3em}
+
+  \begin{exampleblock}{\bfseries 结论 3：协程核心价值 — IO 等待与线程占用的解耦}
+    IO 阻塞时协程被换出、线程继续服务其他协程 $\rightarrow$ 用极低内存（KB 级）支撑海量并发（万级 $\rightarrow$ 百万级）。这是协程在云计算/微服务/实时消息等场景下不可替代的根本原因。
+  \end{exampleblock}
+\end{frame}
+
+% ============================================================
+% SECTION 5: 底层三层协同实现
+% ============================================================
+\section{底层三层协同实现}
+
+% P17: 三层架构总览
+\begin{frame}{编译器 + 运行时 + 操作系统 — 三层协同全景}
+  \vspace{0.5em}
+
+  \begin{center}
+  \begin{tikzpicture}
+    % Layer 1: Compiler
+    \filldraw[fill=darkblue, draw=darkblue, rounded corners=0.3cm] (0,0) rectangle (10,1.5);
+    \node[text=white, font=\large\bfseries, anchor=west] at (0.5,1.1) {编译器层 (Compiler)};
+    \node[text=white, font=\footnotesize, anchor=west] at (0.5,0.5) {将 async/await 编译为状态机, 拆分挂起点, 生成协程帧};
+    \node[text=white, font=\footnotesize, anchor=east] at (9.5,0.5) {$\leftarrow$ 负责「转化」};
+
+    % Arrow
+    \draw[->, thick, color=corGray] (5,0) -- (5,-0.3);
+
+    % Layer 2: Runtime
+    \filldraw[fill=midblue, draw=midblue, rounded corners=0.3cm] (0,-0.7) rectangle (10,0.8);
+    \node[text=white, font=\large\bfseries, anchor=west] at (0.5,0.4) {运行时层 (Runtime)};
+    \node[text=white, font=\footnotesize, anchor=west] at (0.5,-0.2) {调度器、事件循环、协程/线程映射、netpoller};
+    \node[text=white, font=\footnotesize, anchor=east] at (9.5,-0.2) {$\leftarrow$ 负责「调度」};
+
+    % Arrow
+    \draw[->, thick, color=corGray] (5,-1.1) -- (5,-1.4);
+
+    % Layer 3: OS
+    \filldraw[fill=corGold, draw=corGold, rounded corners=0.3cm] (0,-1.8) rectangle (10,0.5);
+    \node[text=white, font=\large\bfseries, anchor=west] at (0.5,0.1) {操作系统层 (OS Kernel)};
+    \node[text=white, font=\footnotesize, anchor=west] at (0.5,-0.5) {epoll/kqueue/IOCP、内核线程管理、定时器 (timerfd)};
+    \node[text=white, font=\footnotesize, anchor=east] at (9.5,-0.5) {$\leftarrow$ 负责「等待」};
+  \end{tikzpicture}
+  \end{center}
+
+  \vspace{0.5em}
+  \centering
+  \textbf{三层分工：编译器负责「转化」—— 运行时负责「调度」—— OS 负责「等待」}
+\end{frame}
+
+% P18: 三层各司其职
+\begin{frame}{三层各司其职 — 详细拆解}
+  \begin{columns}[T]
+    \column{0.33\textwidth}
+    \begin{block}{\textcolor{white}{\textbf{编译器}}}
+      \color{white}
+      \begin{enumerate}
+        \footnotesize
+        \item 将 async 函数拆分为基本块
+        \item 每个 await 点 = 一个状态
+        \item 生成协程帧结构体
+        \item 生成状态机驱动函数
+        \item Go：插入 stack guard 抢占检查点
+      \end{enumerate}
+    \end{block}
+
+    \column{0.33\textwidth}
+    \begin{block}{\textcolor{white}{\textbf{运行时}}}
+      \color{white}
+      \begin{enumerate}
+        \footnotesize
+        \item 调度器：维护就绪队列
+        \item 生命周期：创建$\rightarrow$运行$\rightarrow$挂起$\rightarrow$回收
+        \item M:N 协程$\leftrightarrow$OS 线程映射
+        \item netpoller：封装 epoll/kqueue
+        \item Timer：四叉堆高效定时器
+      \end{enumerate}
+    \end{block}
+
+    \column{0.33\textwidth}
+    \begin{exampleblock}{\textcolor{white}{\textbf{操作系统}}}
+      \color{white}
+      \begin{enumerate}
+        \footnotesize
+        \item epoll(Linux)/kqueue(BSD)/IOCP(Win)
+        \item 单次系统调用监听数千 fd
+        \item IO 就绪：内核$\rightarrow$用户态通知
+        \item 内核级定时器(timerfd)+信号
+        \item DMA$\rightarrow$协议栈$\rightarrow$fd 就绪
+      \end{enumerate}
+    \end{exampleblock}
+  \end{columns}
+
+  \vspace{0.5em}
+  \centering
+  {\footnotesize\color{corGray}三层协作：编译器把同步代码「翻译」成状态机 $\rightarrow$ 运行时在用户态调度状态机 $\rightarrow$ OS 高效地「等待」IO 事件}
+\end{frame}
+
+% P19: IO 全链路追踪
+\begin{frame}{一次 IO 阻塞的全链路追踪 (Go Goroutine + epoll)}
+  \vspace{-0.3em}
+  \begin{enumerate}
+    \setlength{\itemsep}{0.4em}
+    \item \textbf{G1 执行 conn.Read(buf) $\rightarrow$ 系统调用 read(fd)}
+    \item \textbf{fd 未就绪 $\rightarrow$ read 返回 EAGAIN $\rightarrow$ runtime 观测到}
+    \item \textbf{netpollblock()：G1 绑定 fd $\rightarrow$ epoll\_ctl(ADD, fd) $\rightarrow$ gopark(G1)}
+    \item \textcolor{corGreen}{\textbf{P 从 runq 取 G2 继续执行（G1 的阻塞「零成本」传导）}}
+    \item \textbf{内核：远端数据 $\rightarrow$ DMA $\rightarrow$ 协议栈 $\rightarrow$ fd 就绪 $\rightarrow$ epoll 事件队列}
+    \item \textbf{netpoller 调 epoll\_wait $\rightarrow$ 获取就绪 fd $\rightarrow$ 标记 G1 为 runnable}
+    \item \textcolor{corGreen}{\textbf{P 发现 G1 runnable $\rightarrow$ 恢复执行 G1 $\rightarrow$ read 成功返回}}
+  \end{enumerate}
+
+  \vspace{0.5em}
+  \begin{alertblock}{核心洞察}
+    \centering
+    从 G1 挂起到恢复，承载它的 M（OS 线程）\textbf{从未被阻塞}——它一直在执行其他 Goroutine。\\
+    这就是「IO 等待与线程解耦」的完整实现。
+  \end{alertblock}
+\end{frame}
+
+% ============================================================
+% SECTION 6: 收尾
+% ============================================================
+\section{总结}
+
+% P20: 适用/禁用场景
+\begin{frame}{协程适用/禁用场景 \& 工程避坑}
+  \begin{columns}[T]
+    \column{0.48\textwidth}
+    \begin{exampleblock}{\textbf{推荐使用协程}}
+      \begin{itemize}
+        \item 高并发 IO 密集型服务（Web 服务器、API 网关、微服务 RPC）
+        \item 实时消息推送（WebSocket 长连接、IM 系统）
+        \item 爬虫/数据采集（高并发 HTTP 请求）
+        \item 数据库中间件/代理（连接池管理）
+        \item 云原生 Serverless/FaaS 函数计算
+      \end{itemize}
+    \end{exampleblock}
+
+    \column{0.48\textwidth}
+    \begin{alertblock}{\textbf{不推荐 / 需谨慎}}
+      \begin{itemize}
+        \item CPU 密集型计算（协程无加速，用线程/进程池）
+        \item 极低延迟要求（$<$100$\mu$s，调度开销为瓶颈）
+        \item 需要严格实时性保证（调度器非确定性）
+      \end{itemize}
+    \end{alertblock}
+
+    \vspace{0.3em}
+  \end{columns}
+
+  \vspace{0.3em}
+  \begin{block}{\textbf{工程避坑清单}}
+    \begin{itemize}
+      \item 避免在协程中执行阻塞系统调用（会阻塞整个 OS 线程）
+      \item 注意 goroutine 泄漏（channel 未关闭导致永久阻塞）
+      \item CPU 密集任务用 runtime.Gosched() 或专用线程池 offload
+      \item 设置合理的超时和 context 取消机制
+    \end{itemize}
+  \end{block}
+\end{frame}
+
+% P21: 总结
+\begin{frame}{全文总结}
+  \begin{columns}[T]
+    \column{0.48\textwidth}
+    \begin{block}{\textcolor{white}{\textbf{1. 并发演进}}}
+      \color{white}
+      协程是并发模型第五代产物\\
+      核心价值：用户态调度 + IO/线程解耦
+    \end{block}
+
+    \vspace{0.3em}
+
+    \begin{exampleblock}{\textbf{3. 性能实证}}
+      IO 密集：协程碾压线程池（16.7$\times$）\\
+      CPU 密集：协程无效，等同串行
+    \end{exampleblock}
+
+    \column{0.48\textwidth}
+    \begin{block}{\textcolor{white}{\textbf{2. 技术原理}}}
+      \color{white}
+      有栈 vs 无栈各有取舍\\
+      编译器 + 运行时 + OS 三层协同实现
+    \end{block}
+
+    \vspace{0.3em}
+
+    \begin{exampleblock}{\textbf{4. 工程选择}}
+      高并发服务 $\rightarrow$ Go / Java 21\\
+      IO 脚本 $\rightarrow$ Python asyncio\\
+      嵌入/游戏 $\rightarrow$ C++20
+    \end{exampleblock}
+  \end{columns}
+
+  \vspace{0.8em}
+
+  \textbf{参考文献}
+  \vspace{0.2em}
+  {\footnotesize
+  [1] Go Runtime Scheduler --- Golang 源码 src/runtime/proc.go\\
+  [2] JEP 444: Virtual Threads --- OpenJDK\\
+  [3] C++20 Coroutines Technical Specification --- ISO/IEC 14882:2020\\
+  [4] Python asyncio --- PEP 3156\\
+  [5] Linux epoll(7) --- Linux Programmer's Manual}
+\end{frame}
+
+% 结束页
+\begin{frame}[plain]
+  \begin{tikzpicture}[remember picture,overlay]
+    % 背景设置
+    \node[fill=midblue, opacity=1, minimum width=\paperwidth, minimum height=\paperheight] at (current page.center) {};
+
+    % 顶部金色线
+    \draw[line width=3pt, color=corGold] (current page.north west) -- (current page.north east);
+
+    % THANKS
+    \node[font=\fontsize{40}{70}\selectfont\bfseries, text=white] at ([yshift=0.5cm]current page.center) {谢谢！};
+
+    % 副标题
+    \node[font=\large, text=corGold] at ([yshift=-1.2cm]current page.center) {协程技术调研报告};
+    \node[font=\footnotesize, text=corGray] at ([yshift=-2cm]current page.center) {计算机系统结构课程调研项目 \quad | \quad 2026年6月};
+  \end{tikzpicture}
+\end{frame}
+
+\end{document}
